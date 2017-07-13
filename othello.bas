@@ -1,3 +1,4 @@
+DECLARE FUNCTION alphabeta% (player%, board%(), achievable%, cutoff%, ply%)
 DECLARE FUNCTION FinalValue% (player%, board%())
 DECLARE FUNCTION WeightedSquares% (player%, board%())
 DECLARE FUNCTION MaximizeDifference% (player%, board%())
@@ -19,6 +20,7 @@ DECLARE SUB showbd ()
 DIM SHARED board(100) AS INTEGER
 DIM SHARED AllDirections(8) AS INTEGER
 DIM SHARED weights(100) AS INTEGER
+CLEAR , , 9999
 FOR i = 1 TO 8
 READ AllDirections(i)
 NEXT
@@ -51,9 +53,10 @@ CONST BLACK = 1
 CONST WHITE = 2
 CONST OUTER = 3
 CONST WinningValue = 32767
-CONST LosingValue = -32768
+CONST LosingValue = -32767
+CONST nply = 5
 
-
+DIM SHARED bestm(nply) AS INTEGER
 DIM SHARED ax AS INTEGER: ax = 0
 DIM SHARED bx AS INTEGER: bx = 0
 DIM SHARED cx AS INTEGER: cx = 0
@@ -77,18 +80,50 @@ CALL MakeMove(n, player, board())
 player = NextToPlay(board(), player)
 END IF
 END IF
+CALL showbd
 IF player = computer THEN
-n = MaximizeDifference(player, board())
-CALL MakeMove(n, player, board())
+n = alphabeta(player, board(), LosingValue, WinningValue, nply)
+move = bestm(nply)
+CALL MakeMove(move, player, board())
 player = NextToPlay(board(), player)
+IF player = 0 THEN END
 END IF
 LOOP
 
-FUNCTION AnyLegalMove (player, board())
-FOR y = 1 TO 8
-FOR x = 1 TO 8
-IF LegalP(10 * y + x, player, board()) THEN AnyLegalMove = -1: EXIT FUNCTION
+FUNCTION alphabeta (player, board(), achievable, cutoff, ply)
+DIM board2(100)
+FOR i = 0 TO 99
+board2(i) = board(i)
 NEXT
+IF ply = 0 THEN
+	alphabeta = WeightedSquares(player, board())
+	EXIT FUNCTION
+END IF
+nlegal = 0
+FOR move = 0 TO 99
+IF LegalP(move, player, board()) THEN
+	nlegal = nlegal + 1
+	CALL MakeMove(move, player, board2())
+	value = -alphabeta(opponent(player), board2(), -cutoff, -achievable, ply - 1)
+	IF value > achievable THEN
+		achievable = value
+		bestmove = move
+	 END IF
+END IF
+NEXT
+IF nlegal = 0 THEN
+	IF AnyLegalMove(opponent(player), board()) THEN
+	alphabeta = -alphabeta(opponent(player), board(), -cutoff, -achievable, ply - 1)
+	ELSE
+	alphabeta = FinalValue(player, board())
+	END IF
+END IF
+bestm(ply) = bestmove
+END FUNCTION
+
+FUNCTION AnyLegalMove (player, board())
+FOR i = 0 TO 99
+IF LegalP(i, player, board()) THEN AnyLegalMove = -1: EXIT FUNCTION
 NEXT
 END FUNCTION
 
