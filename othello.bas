@@ -1,4 +1,4 @@
-DECLARE FUNCTION alphabeta% (player%, board%(), achievable%, cutoff%, ply%)
+DECLARE FUNCTION AlphaBeta% (player%, board%(), achievable%, cutoff%, ply%)
 DECLARE FUNCTION FinalValue% (player%, board%())
 DECLARE FUNCTION WeightedSquares% (player%, board%())
 DECLARE FUNCTION MaximizeDifference% (player%, board%())
@@ -10,13 +10,13 @@ DECLARE FUNCTION WouldFlip% (move%, player%, board%(), dir%)
 DECLARE FUNCTION FindBracketingPiece% (square%, player%, board%(), dir%)
 DECLARE FUNCTION NextToPlay% (board%(), PreviousPlayer%)
 DECLARE FUNCTION AnyLegalMove% (player%, board%())
-DECLARE FUNCTION opponent% (player%)
+DECLARE FUNCTION Opponent% (player%)
 DECLARE SUB MakeFlips (move%, player%, board%(), dir%)
 DEFINT A-Z
-DECLARE SUB mouse (ax AS INTEGER)
-DECLARE FUNCTION getmove% ()
-DECLARE FUNCTION colour (i)
-DECLARE SUB showbd ()
+DECLARE SUB Mouse (ax AS INTEGER)
+DECLARE FUNCTION GetMove% ()
+DECLARE FUNCTION Colour (i)
+DECLARE SUB ShowBd ()
 DIM SHARED board(100) AS INTEGER
 DIM SHARED AllDirections(8) AS INTEGER
 DIM SHARED weights(100) AS INTEGER
@@ -70,37 +70,36 @@ dx = 0
 
 SCREEN 12
 CALL InitBoard
-CALL mouse(0)
-CALL mouse(1)
+CALL Mouse(0)
+CALL Mouse(1)
 player = BLACK
 human = BLACK
-computer = opponent(human)
+computer = Opponent(human)
 DO
-  CALL showbd
+  CALL ShowBd
   IF player = human THEN
-    n = getmove
+    n = GetMove
     IF LegalP(n, player, board()) THEN
       CALL MakeMove(n, player, board())
       player = NextToPlay(board(), player)
     END IF
   END IF
-  CALL showbd
+  CALL ShowBd
   IF player = computer THEN
-    n = alphabeta(player, board(), LosingValue, WinningValue, nply)
+    n = AlphaBeta(player, board(), LosingValue, WinningValue, nply)
     move = bestm(nply)
     CALL MakeMove(move, player, board())
     player = NextToPlay(board(), player)
-    IF player = 0 THEN END
   END IF
-LOOP
+LOOP UNTIL player = 0
 
-FUNCTION alphabeta (player, board(), achievable, cutoff, ply)
+FUNCTION AlphaBeta (player, board(), achievable, cutoff, ply)
   DIM board2(100)
   FOR i = 0 TO 99
     board2(i) = board(i)
   NEXT
   IF ply = 0 THEN
-    alphabeta = WeightedSquares(player, board())
+    AlphaBeta = WeightedSquares(player, board())
     EXIT FUNCTION
   END IF
   nlegal = 0
@@ -108,7 +107,7 @@ FUNCTION alphabeta (player, board(), achievable, cutoff, ply)
     IF LegalP(move, player, board()) THEN
       nlegal = nlegal + 1
       CALL MakeMove(move, player, board2())
-      value = -alphabeta(opponent(player), board2(), -cutoff, -achievable, ply - 1)
+      value = -AlphaBeta(Opponent(player), board2(), -cutoff, -achievable, ply - 1)
       IF value > achievable THEN
         achievable = value
         bestmove = move
@@ -116,10 +115,10 @@ FUNCTION alphabeta (player, board(), achievable, cutoff, ply)
     END IF
   NEXT
   IF nlegal = 0 THEN
-    IF AnyLegalMove(opponent(player), board()) THEN
-      alphabeta = -alphabeta(opponent(player), board(), -cutoff, -achievable, ply - 1)
+    IF AnyLegalMove(Opponent(player), board()) THEN
+      AlphaBeta = -AlphaBeta(Opponent(player), board(), -cutoff, -achievable, ply - 1)
     ELSE
-      alphabeta = FinalValue(player, board())
+      AlphaBeta = FinalValue(player, board())
     END IF
   END IF
   bestm(ply) = bestmove
@@ -131,11 +130,11 @@ FUNCTION AnyLegalMove (player, board())
   NEXT
 END FUNCTION
 
-FUNCTION colour (i)
+FUNCTION Colour (i)
   IF i = BLACK THEN
-    colour = 0
+    Colour = 0
   ELSE
-    colour = 15
+    Colour = 15
   END IF
 END FUNCTION
 
@@ -144,7 +143,7 @@ FUNCTION CountDifference (player, board())
   FOR y = 1 TO 8
     FOR x = 1 TO 8
       IF board(10 * y + x) = player THEN c = c + 1
-      IF board(10 * y + x) = opponent(player) THEN c = c - 1
+      IF board(10 * y + x) = Opponent(player) THEN c = c - 1
     NEXT
   NEXT
   CountDifference = c
@@ -164,21 +163,21 @@ END FUNCTION
 FUNCTION FindBracketingPiece (square, player, board(), dir)
   IF board(square) = player THEN
     FindBracketingPiece = square
-  ELSEIF board(square) = opponent(player) THEN
+  ELSEIF board(square) = Opponent(player) THEN
     FindBracketingPiece = FindBracketingPiece(square + dir, player, board(), dir)
   END IF
 END FUNCTION
 
-FUNCTION getmove
+FUNCTION GetMove
   DO
-    CALL mouse(3)
+    CALL Mouse(3)
     IF bx AND 1 THEN
       y = (dx - tly) \ SquareWidth + 1
       x = (cx - tlx) \ SquareWidth + 1
     END IF
     IF 1 <= y AND y <= 8 AND 1 <= x AND x <= 8 THEN EXIT DO
   LOOP
-  getmove = 10 * y + x
+  GetMove = 10 * y + x
 END FUNCTION
 
 SUB InitBoard
@@ -237,7 +236,7 @@ FUNCTION MaximizeDifference (player, board())
   MaximizeDifference = bestmove
 END FUNCTION
 
-SUB mouse (ax AS INTEGER)
+SUB Mouse (ax AS INTEGER)
   
   ml$ = "" ' -=<( Mouse Code )>=-
   ml$ = ml$ + CHR$(&H55) ' push bp               ; preserve BP register
@@ -264,17 +263,17 @@ SUB mouse (ax AS INTEGER)
 END SUB
 
 FUNCTION NextToPlay (board(), PreviousPlayer)
-  opp = opponent(PreviousPlayer)
+  opp = Opponent(PreviousPlayer)
   IF AnyLegalMove(opp, board()) THEN NextToPlay = opp: EXIT FUNCTION
   IF AnyLegalMove(PreviousPlayer, board()) THEN NextToPlay = PreviousPlayer
 END FUNCTION
 
-FUNCTION opponent (player)
-  IF player = WHITE THEN opponent = BLACK
-  IF player = BLACK THEN opponent = WHITE
+FUNCTION Opponent (player)
+  IF player = WHITE THEN Opponent = BLACK
+  IF player = BLACK THEN Opponent = WHITE
 END FUNCTION
 
-SUB showbd
+SUB ShowBd
   LINE (tlx, tly)-(brx, bry), 8, BF
   FOR i = 0 TO 8
     LINE (tlx + SquareWidth * i, tly)-(tlx + SquareWidth * i, bry)
@@ -283,15 +282,15 @@ SUB showbd
   FOR y = 1 TO 8
     FOR x = 1 TO 8
       IF board(10 * y + x) <> EMPTY THEN
-        CIRCLE (tlx + SquareWidth * x - SquareWidth / 2, tly + SquareWidth * y - SquareWidth / 2), PieceRadius, colour(board(10 * y + x))
-        PAINT (tlx + SquareWidth * x - SquareWidth / 2, tly + SquareWidth * y - SquareWidth / 2), colour(board(10 * y + x))
+        CIRCLE (tlx + SquareWidth * x - SquareWidth / 2, tly + SquareWidth * y - SquareWidth / 2), PieceRadius, Colour(board(10 * y + x))
+        PAINT (tlx + SquareWidth * x - SquareWidth / 2, tly + SquareWidth * y - SquareWidth / 2), Colour(board(10 * y + x))
       END IF
     NEXT
   NEXT
 END SUB
 
 FUNCTION WeightedSquares (player, board())
-  opp = opponent(player)
+  opp = Opponent(player)
   sum = 0
   FOR i = 0 TO 99
     IF board(i) = player THEN sum = sum + weights(i)
@@ -302,7 +301,7 @@ END FUNCTION
 
 FUNCTION WouldFlip (move, player, board(), dir)
   c = move + dir
-  IF board(c) <> opponent(player) THEN WouldFlip = 0: EXIT FUNCTION
+  IF board(c) <> Opponent(player) THEN WouldFlip = 0: EXIT FUNCTION
   WouldFlip = FindBracketingPiece(c + dir, player, board(), dir)
 END FUNCTION
 
