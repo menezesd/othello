@@ -113,6 +113,7 @@ FUNCTION AlphaBeta (player, board(), achievable, cutoff, ply)
         bestmove = move
       END IF
     END IF
+    IF achievable >= cutoff THEN EXIT FOR
   NEXT
   IF nlegal = 0 THEN
     IF AnyLegalMove(Opponent(player), board()) THEN
