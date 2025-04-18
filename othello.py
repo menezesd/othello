@@ -7,7 +7,7 @@ from typing import List, Tuple, Optional
 # Game settings
 BOARD_DIM = 8  # Playable board dimension (8x8)
 ARRAY_DIM = BOARD_DIM + 2  # Internal array dimension including border (10x10)
-PLY_DEPTH = 9  # AI search depth 
+PLY_DEPTH = 5  # AI search depth 
 
 # Colors
 COLOR_BOARD_BG = (0, 128, 0)  # Green
