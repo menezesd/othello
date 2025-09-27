@@ -26,28 +26,45 @@ struct TTEntry {
     TTEntry(int v, int d, int move, Flag f) : value(v), depth(d), bestMove(move), flag(f) {}
 };
 
-// Hash function for board position
-struct BoardHash {
-    std::size_t operator()(const std::array<int, 100>& board) const {
-        std::size_t hash = 0;
-        for(int i = 0; i < 100; ++i) {
-            hash ^= std::hash<int>{}(board[i]) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+// TT Key structure that includes player-to-move
+struct TTKey {
+    std::array<int, 100> board;
+    int player; // BLACK/WHITE
+    
+    bool operator==(const TTKey& other) const noexcept {
+        return player == other.player && board == other.board;
+    }
+};
+
+// Hash function for TT key
+struct TTKeyHash {
+    std::size_t operator()(const TTKey& key) const noexcept {
+        std::size_t hash = 1469598103934665603ull;
+        for(int value : key.board) {
+            hash ^= std::hash<int>{}(value);
+            hash *= 1099511628211ull;
         }
+        hash ^= std::hash<int>{}(key.player);
+        hash *= 1099511628211ull;
         return hash;
     }
 };
 
 class TranspositionTable {
 private:
-    std::unordered_map<std::array<int, 100>, TTEntry, BoardHash> table;
+    std::unordered_map<TTKey, TTEntry, TTKeyHash> table;
     
 public:
-    void store(const std::array<int, 100>& board, int value, int depth, int bestMove, TTEntry::Flag flag) {
-        table[board] = TTEntry(value, depth, bestMove, flag);
+    void store(const std::array<int, 100>& board, int player, int value, int depth, int bestMove, TTEntry::Flag flag) {
+        auto& slot = table[{board, player}];
+        // Only replace if deeper or equal depth (depth-preferred replacement)
+        if(depth >= slot.depth) {
+            slot = TTEntry(value, depth, bestMove, flag);
+        }
     }
     
-    bool lookup(const std::array<int, 100>& board, int depth, int alpha, int beta, int& value, int& bestMove) {
-        auto it = table.find(board);
+    bool lookup(const std::array<int, 100>& board, int player, int depth, int alpha, int beta, int& value, int& bestMove) {
+        auto it = table.find(TTKey{board, player});
         if(it == table.end()) return false;
         
         const TTEntry& entry = it->second;
@@ -124,6 +141,9 @@ public:
     }
 };
 
+// Helper function to count flips for move ordering
+int countFlipsForMove(const class OthelloBoard& board, int move, int player);
+
 class OthelloBoard {
 public:
     static const int EMPTY = 0;
@@ -169,8 +189,12 @@ public:
     }
 
     bool hasLegalMoves(int player) const {
-        for(int move = 0; move < 100; move++) {
-            if(legalMove(move, player)) return true;
+        for(int i = 11; i <= 88; ++i) {
+            if(i % 10 == 0 || i % 10 == 9) { 
+                i += (i % 10 == 9); // Skip border fast
+                continue; 
+            }
+            if(board[i] == EMPTY && legalMove(i, player)) return true;
         }
         return false;
     }
@@ -334,12 +358,21 @@ public:
     }
     
     int dangerousSquares(int player) const {
-        // X-squares adjacent to corners (dangerous to occupy early)
-        int dangerous[] = {22, 12, 21, 27, 17, 28, 72, 82, 71, 77, 87, 78};
+        // X-squares adjacent to corners - only penalize if corner isn't controlled
+        const struct { int xSquare; int corner; } dangerousSpots[] = {
+            {22, 11}, {12, 11}, {21, 11},  // Corner 11 (top-left)
+            {27, 18}, {17, 18}, {28, 18},  // Corner 18 (top-right)
+            {72, 81}, {82, 81}, {71, 81},  // Corner 81 (bottom-left)
+            {77, 88}, {87, 88}, {78, 88}   // Corner 88 (bottom-right)
+        };
+        
         int penalty = 0;
-        for(int pos : dangerous) {
-            if(board[pos] == player) penalty -= 25;
-            else if(board[pos] == opponent(player)) penalty += 25;
+        for(const auto& spot : dangerousSpots) {
+            // Only penalize X-squares if we don't control the adjacent corner
+            if(board[spot.corner] != player) {
+                if(board[spot.xSquare] == player) penalty -= 25;
+                else if(board[spot.xSquare] == opponent(player)) penalty += 25;
+            }
         }
         return penalty;
     }
@@ -389,6 +422,23 @@ const int OthelloBoard::weights[100] = {
     0, 120, -20, 20, 5, 5, 20, -20, 120, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
+
+// Fast flip counting for move ordering
+int countFlipsForMove(const OthelloBoard& board, int move, int player) {
+    int flips = 0;
+    for(int k = 0; k < 8; ++k) {
+        int dir = OthelloBoard::AllDirections[k];
+        int pos = move + dir;
+        int run = 0;
+        if(board.board[pos] != board.opponent(player)) continue;
+        while(board.board[pos] == board.opponent(player)) {
+            ++run;
+            pos += dir;
+        }
+        if(board.board[pos] == player) flips += run;
+    }
+    return flips;
+}
 
 class OthelloRenderer {
 public:
@@ -475,11 +525,14 @@ public:
     TranspositionTable transTable;
     TimeManager timeManager;
     bool timeExpired;
+    int historyHeuristic[100]; // History heuristic for move ordering
 
     OthelloGame()
         : bestm(nply+1), player(OthelloBoard::BLACK), human(OthelloBoard::BLACK), computer(OthelloBoard::WHITE), timeExpired(false) {
         // Set AI thinking time based on game phase
         timeManager.setTimeLimit(2000); // 2 seconds per move
+        // Initialize history heuristic
+        for(int i = 0; i < 100; ++i) historyHeuristic[i] = 0;
     }
 
     void initSDL() {
@@ -523,7 +576,7 @@ public:
         // Check if time limit exceeded
         if(timeManager.timeUp()) {
             timeExpired = true;
-            return 0; // Return neutral value when time runs out
+            return alpha; // Return current lower bound to maintain consistency
         }
         
         int originalAlpha = alpha;
@@ -531,52 +584,71 @@ public:
         
         // Check transposition table
         int ttValue, ttMove = -1;
-        if(transTable.lookup(boardArray, ply, alpha, beta, ttValue, ttMove)) {
+        if(transTable.lookup(boardArray, player, ply, alpha, beta, ttValue, ttMove)) {
             if(ply > 0) bestm[ply] = ttMove;
             return ttValue;
         }
         
         if(ply == 0) {
             int evaluation = board.advancedEvaluation(player);
-            transTable.store(boardArray, evaluation, ply, -1, TTEntry::EXACT);
+            transTable.store(boardArray, player, evaluation, ply, -1, TTEntry::EXACT);
             return evaluation;
         }
         
+        // Fast move generation: only check inner 8x8 squares and empty cells
         std::vector<int> moves;
-        for(int move = 0; move < 100; move++) {
-            if(board.legalMove(move, player)) moves.push_back(move);
+        moves.reserve(20); // Reserve space for efficiency
+        for(int i = 11; i <= 88; ++i) {
+            if(i % 10 == 0 || i % 10 == 9) { 
+                i += (i % 10 == 9); // Skip border fast: jump to next row
+                continue; 
+            }
+            if(board.board[i] == OthelloBoard::EMPTY && board.legalMove(i, player)) {
+                moves.push_back(i);
+            }
         }
         
-        // Move ordering: prioritize TT move, then sort by move evaluation
+        // Move ordering: prioritize TT move, then sort by advanced criteria
+        int startSort = 0;
         if(ttMove != -1) {
             auto it = std::find(moves.begin(), moves.end(), ttMove);
             if(it != moves.end()) {
                 moves.erase(it);
                 moves.insert(moves.begin(), ttMove);
+                startSort = 1;
             }
         }
         
-        // Sort remaining moves by quick evaluation (corners first, then static weights)
-        std::sort(moves.begin() + (ttMove != -1 ? 1 : 0), moves.end(), [this, player](int a, int b) {
-            // Prioritize corners
+        // Enhanced move ordering: corners → history → flips → static weights
+        std::sort(moves.begin() + startSort, moves.end(), [this, player](int a, int b) {
+            // Prioritize corners first
             bool aIsCorner = (a == 11 || a == 18 || a == 81 || a == 88);
             bool bIsCorner = (b == 11 || b == 18 || b == 81 || b == 88);
             if(aIsCorner != bIsCorner) return aIsCorner;
             
-            // Then use static weights
+            // Then history heuristic
+            int ha = historyHeuristic[a], hb = historyHeuristic[b];
+            if(ha != hb) return ha > hb;
+            
+            // Then moves that flip more pieces
+            int fa = countFlipsForMove(board, a, player);
+            int fb = countFlipsForMove(board, b, player);
+            if(fa != fb) return fa > fb;
+            
+            // Finally use static position weights
             return OthelloBoard::weights[a] > OthelloBoard::weights[b];
         });
         
         if(moves.empty()) {
             if(board.hasLegalMoves(board.opponent(player))) {
                 int val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
-                transTable.store(boardArray, val, ply, -1, TTEntry::EXACT);
+                transTable.store(boardArray, player, val, ply, -1, TTEntry::EXACT);
                 return val;
             }
             int diff = 0;
             for(int i = 0; i < 100; ++i) diff += (board.board[i] == player) - (board.board[i] == board.opponent(player));
             int val = (diff > 0) ? WinningValue : (diff < 0) ? LosingValue : 0;
-            transTable.store(boardArray, val, ply, -1, TTEntry::EXACT);
+            transTable.store(boardArray, player, val, ply, -1, TTEntry::EXACT);
             return val;
         }
         
@@ -599,7 +671,11 @@ public:
                     alpha = bestVal;
                     bestm[ply] = bestMove;
                 }
-                if(alpha >= beta) break;
+                if(alpha >= beta) {
+                    // Update history heuristic on cutoff
+                    historyHeuristic[bestMove] += ply * ply;
+                    break;
+                }
             }
         }
         
@@ -612,7 +688,7 @@ public:
         } else {
             flag = TTEntry::EXACT;
         }
-        transTable.store(boardArray, bestVal, ply, bestMove, flag);
+        transTable.store(boardArray, player, bestVal, ply, bestMove, flag);
         
         return bestVal;
     }
@@ -620,6 +696,7 @@ public:
     int iterativeDeepening(int player, int maxDepth) {
         int bestMove = -1;
         timeExpired = false;
+        int lastScore = 0;
         
         // Clear transposition table at start of search for new position
         transTable.clear();
@@ -633,8 +710,36 @@ public:
                 break;
             }
             
-            bestm.assign(depth + 1, -1);
-            alphabeta(player, LosingValue, WinningValue, depth);
+            // Aspiration windows: narrow search around last score
+            int delta = 64; // window half-size
+            int alpha = lastScore - delta;
+            int beta = lastScore + delta;
+            int score;
+            
+            // Aspiration window loop
+            for(;;) {
+                bestm.assign(depth + 1, -1);
+                score = alphabeta(player, alpha, beta, depth);
+                
+                if(timeExpired) break;
+                
+                // Check if we need to widen the window
+                if(score <= alpha) {
+                    // Fail-low: widen down
+                    alpha -= delta;
+                    delta <<= 1; // Double window size
+                    continue;
+                } else if(score >= beta) {
+                    // Fail-high: widen up
+                    beta += delta;
+                    delta <<= 1; // Double window size
+                    continue;
+                } else {
+                    // Success: score is within window
+                    lastScore = score;
+                    break;
+                }
+            }
             
             // If time expired during search, use previous depth result
             if(timeExpired) {
@@ -646,7 +751,7 @@ public:
             }
             
             // Optional: Print search info
-            // printf("Depth %d completed in %dms, move: %d\n", depth, timeManager.getElapsedMs(), bestMove);
+            // printf("Depth %d completed in %dms, move: %d, score: %d\n", depth, timeManager.getElapsedMs(), bestMove, score);
         }
         
         return bestMove;
