@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <functional>
 #include <chrono>
+#include <array>
 
 const int WinningValue = 32767;
 const int LosingValue = -32767;
