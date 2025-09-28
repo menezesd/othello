@@ -621,9 +621,10 @@ public:
         }
         
         if(ply == 0) {
-            int evaluation = board.advancedEvaluation(player);
-            transTable.store(zobristKey, evaluation, ply, -1, TTEntry::EXACT);
-            return evaluation;
+            // Enter quiescence search to resolve tactical sequences
+            int qScore = quiescenceSearch(player, alpha, beta, 4); // Max 4 plies of quiescence
+            transTable.store(zobristKey, qScore, ply, -1, TTEntry::EXACT);
+            return qScore;
         }
         
         // Fast move generation: only check inner 8x8 squares and empty cells
@@ -686,32 +687,50 @@ public:
         int bestVal = INT_MIN;
         int bestMove = -1;
         bool isPVNode = (beta - alpha > 1);
-        bool firstMove = true;
+        int moveCount = 0;
+        int cutoffCount = 0; // For multi-cut pruning
         
         for(int move : moves) {
             // Check time limit during search
             if(timeExpired) break;
             
+            moveCount++;
             OthelloBoard::UndoInfo undo = board.makeMoveWithUndo(move, player);
             int val;
             
-            if(firstMove) {
-                // Search first move with full window
+            // Determine if we should use Late Move Reductions (LMR)
+            bool isCornerMove = (move == 11 || move == 18 || move == 81 || move == 88);
+            bool isHighFlipMove = countFlipsForMove(board, move, player) >= 6;
+            bool shouldReduce = (moveCount > 3) && (ply >= 3) && !isPVNode && !isCornerMove && !isHighFlipMove;
+            
+            if(moveCount == 1) {
+                // Search first move with full window (PV move)
                 val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
-                firstMove = false;
             } else {
+                int newDepth = ply - 1;
+                
+                // Late Move Reductions: reduce depth for later moves
+                if(shouldReduce) {
+                    newDepth = std::max(1, ply - 2); // Reduce by 1, but keep at least depth 1
+                }
+                
                 // Principal Variation Search (PVS): use null window for non-PV nodes
                 if(isPVNode) {
                     // Try with null window first
-                    val = -alphabeta(board.opponent(player), -alpha-1, -alpha, ply-1);
+                    val = -alphabeta(board.opponent(player), -alpha-1, -alpha, newDepth);
                     
-                    // If it beats alpha, re-search with full window
+                    // If it beats alpha, re-search with full window at full depth
                     if(val > alpha && val < beta && !timeExpired) {
                         val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
                     }
                 } else {
                     // Non-PV node: use null window
-                    val = -alphabeta(board.opponent(player), -alpha-1, -alpha, ply-1);
+                    val = -alphabeta(board.opponent(player), -alpha-1, -alpha, newDepth);
+                    
+                    // If reduced move beats alpha, re-search at full depth
+                    if(shouldReduce && val > alpha && !timeExpired) {
+                        val = -alphabeta(board.opponent(player), -alpha-1, -alpha, ply-1);
+                    }
                 }
             }
             
@@ -729,6 +748,29 @@ public:
                 if(alpha >= beta) {
                     // Update history heuristic on cutoff
                     historyHeuristic[bestMove] += ply * ply;
+                    cutoffCount++;
+                    
+                    // Multi-cut pruning: if multiple moves cause cutoffs at reduced depth,
+                    // assume position is too good and prune immediately
+                    if(!isPVNode && ply >= 3 && cutoffCount >= 2) {
+                        // Try a few more moves at reduced depth to verify the cutoff
+                        int verifyCount = 0;
+                        for(auto it = std::find(moves.begin(), moves.end(), move) + 1; 
+                            it != moves.end() && verifyCount < 3; ++it, ++verifyCount) {
+                            
+                            if(timeExpired) break;
+                            
+                            OthelloBoard::UndoInfo verifyUndo = board.makeMoveWithUndo(*it, player);
+                            int verifyVal = -alphabeta(board.opponent(player), -beta, -alpha, 
+                                                     std::max(1, ply-3)); // Reduced depth
+                            board.unmakeMove(verifyUndo, player);
+                            
+                            if(verifyVal >= beta) {
+                                // Another cutoff - position is definitely too good
+                                return beta;
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -744,6 +786,76 @@ public:
             flag = TTEntry::EXACT;
         }
         transTable.store(zobristKey, bestVal, ply, bestMove, flag);
+        
+        return bestVal;
+    }
+
+    int quiescenceSearch(int player, int alpha, int beta, int maxDepth) {
+        // Check if time limit exceeded
+        if(timeManager.timeUp()) {
+            timeExpired = true;
+            return alpha;
+        }
+        
+        // Stand pat evaluation - assume we can do at least this well
+        int standPat = board.advancedEvaluation(player);
+        if(standPat >= beta) return beta;
+        if(standPat > alpha) alpha = standPat;
+        
+        // If we've reached max quiescence depth, return stand pat
+        if(maxDepth <= 0) return standPat;
+        
+        // Generate only "tactical" moves - high flip count, corners, edge captures
+        std::vector<int> tacticalMoves;
+        for(int i = 11; i <= 88; ++i) {
+            if(i % 10 == 0 || i % 10 == 9) { 
+                i += (i % 10 == 9);
+                continue; 
+            }
+            if(board.board[i] == OthelloBoard::EMPTY && board.legalMove(i, player)) {
+                // Only consider "tactical" moves in quiescence
+                bool isCorner = (i == 11 || i == 18 || i == 81 || i == 88);
+                bool isEdge = (i >= 12 && i <= 17) || (i >= 21 && i <= 28 && (i%10==1 || i%10==8)) ||
+                             (i >= 71 && i <= 78 && (i%10==1 || i%10==8)) || (i >= 82 && i <= 87);
+                int flipCount = countFlipsForMove(board, i, player);
+                bool isHighFlip = flipCount >= 4; // High flip count moves
+                
+                if(isCorner || isEdge || isHighFlip) {
+                    tacticalMoves.push_back(i);
+                }
+            }
+        }
+        
+        // If no tactical moves, return stand pat
+        if(tacticalMoves.empty()) return standPat;
+        
+        // Sort tactical moves by flip count (most flips first)
+        std::sort(tacticalMoves.begin(), tacticalMoves.end(), [this, player](int a, int b) {
+            bool aIsCorner = (a == 11 || a == 18 || a == 81 || a == 88);
+            bool bIsCorner = (b == 11 || b == 18 || b == 81 || b == 88);
+            if(aIsCorner != bIsCorner) return aIsCorner;
+            return countFlipsForMove(board, a, player) > countFlipsForMove(board, b, player);
+        });
+        
+        int bestVal = standPat;
+        
+        for(int move : tacticalMoves) {
+            if(timeExpired) break;
+            
+            OthelloBoard::UndoInfo undo = board.makeMoveWithUndo(move, player);
+            int val = -quiescenceSearch(board.opponent(player), -beta, -alpha, maxDepth-1);
+            board.unmakeMove(undo, player);
+            
+            if(timeExpired) break;
+            
+            if(val > bestVal) {
+                bestVal = val;
+                if(val > alpha) {
+                    alpha = val;
+                    if(alpha >= beta) break; // Beta cutoff
+                }
+            }
+        }
         
         return bestVal;
     }
