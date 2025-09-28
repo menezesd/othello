@@ -7,6 +7,7 @@
 #include <functional>
 #include <chrono>
 #include <array>
+#include <random>
 
 const int WinningValue = 32767;
 const int LosingValue = -32767;
@@ -14,6 +15,27 @@ const int nply = 5;
 const int SquareWidth = 60;
 const int tlx = (640 - 480) / 2;
 const int tly = 0;
+
+// Zobrist hashing for fast position keys
+namespace Zobrist {
+    uint64_t squarePiece[100][4]; // [square][piece] - EMPTY, BLACK, WHITE, OUTER
+    uint64_t sideToMove[2];       // [BLACK/WHITE-1] for side to move
+    bool initialized = false;
+    
+    void init() {
+        if (initialized) return;
+        
+        std::mt19937_64 rng(0xC0FFEE); // Fixed seed for reproducibility  
+        for (int i = 0; i < 100; ++i) {
+            for (int piece = 0; piece < 4; ++piece) {
+                squarePiece[i][piece] = rng();
+            }
+        }
+        sideToMove[0] = rng(); // BLACK-1
+        sideToMove[1] = rng(); // WHITE-1
+        initialized = true;
+    }
+}
 
 // Transposition table entry
 struct TTEntry {
@@ -26,45 +48,21 @@ struct TTEntry {
     TTEntry(int v, int d, int move, Flag f) : value(v), depth(d), bestMove(move), flag(f) {}
 };
 
-// TT Key structure that includes player-to-move
-struct TTKey {
-    std::array<int, 100> board;
-    int player; // BLACK/WHITE
-    
-    bool operator==(const TTKey& other) const noexcept {
-        return player == other.player && board == other.board;
-    }
-};
-
-// Hash function for TT key
-struct TTKeyHash {
-    std::size_t operator()(const TTKey& key) const noexcept {
-        std::size_t hash = 1469598103934665603ull;
-        for(int value : key.board) {
-            hash ^= std::hash<int>{}(value);
-            hash *= 1099511628211ull;
-        }
-        hash ^= std::hash<int>{}(key.player);
-        hash *= 1099511628211ull;
-        return hash;
-    }
-};
-
 class TranspositionTable {
 private:
-    std::unordered_map<TTKey, TTEntry, TTKeyHash> table;
+    std::unordered_map<uint64_t, TTEntry> table;
     
 public:
-    void store(const std::array<int, 100>& board, int player, int value, int depth, int bestMove, TTEntry::Flag flag) {
-        auto& slot = table[{board, player}];
+    void store(uint64_t zobristKey, int value, int depth, int bestMove, TTEntry::Flag flag) {
+        auto& slot = table[zobristKey];
         // Only replace if deeper or equal depth (depth-preferred replacement)
         if(depth >= slot.depth) {
             slot = TTEntry(value, depth, bestMove, flag);
         }
     }
     
-    bool lookup(const std::array<int, 100>& board, int player, int depth, int alpha, int beta, int& value, int& bestMove) {
-        auto it = table.find(TTKey{board, player});
+    bool lookup(uint64_t zobristKey, int depth, int alpha, int beta, int& value, int& bestMove) {
+        auto it = table.find(zobristKey);
         if(it == table.end()) return false;
         
         const TTEntry& entry = it->second;
@@ -153,20 +151,32 @@ public:
     static const int AllDirections[8];
     static const int weights[100];
     int board[100];
+    uint64_t zobristKey; // Incremental Zobrist hash
 
-    OthelloBoard() { initBoard(); }
+    OthelloBoard() { 
+        Zobrist::init();
+        initBoard(); 
+    }
 
     void initBoard() {
+        zobristKey = 0;
         for(int i = 0; i < 100; i++) {
-            if(i < 10 || i >= 90 || i%10 == 0 || i%10 == 9)
+            if(i < 10 || i >= 90 || i%10 == 0 || i%10 == 9) {
                 board[i] = OUTER;
-            else
+            } else {
                 board[i] = EMPTY;
+            }
+            zobristKey ^= Zobrist::squarePiece[i][board[i]];
         }
-        board[44] = BLACK;
-        board[45] = WHITE;
-        board[54] = WHITE;
-        board[55] = BLACK;
+        
+        // Set starting position
+        zobristKey ^= Zobrist::squarePiece[44][EMPTY]; board[44] = BLACK; zobristKey ^= Zobrist::squarePiece[44][BLACK];
+        zobristKey ^= Zobrist::squarePiece[45][EMPTY]; board[45] = WHITE; zobristKey ^= Zobrist::squarePiece[45][WHITE];
+        zobristKey ^= Zobrist::squarePiece[54][EMPTY]; board[54] = WHITE; zobristKey ^= Zobrist::squarePiece[54][WHITE];
+        zobristKey ^= Zobrist::squarePiece[55][EMPTY]; board[55] = BLACK; zobristKey ^= Zobrist::squarePiece[55][BLACK];
+        
+        // Start with BLACK to move
+        zobristKey ^= Zobrist::sideToMove[BLACK - 1];
     }
 
     int opponent(int player) const {
@@ -232,7 +242,10 @@ public:
         if(bracketer) {
             for(int pos = move + dir; pos != bracketer; pos += dir) {
                 flipped.push_back(pos);
+                // Update Zobrist key for the flip
+                zobristKey ^= Zobrist::squarePiece[pos][board[pos]]; // Remove old piece
                 board[pos] = player;
+                zobristKey ^= Zobrist::squarePiece[pos][player];     // Add new piece
             }
         }
         return flipped;
@@ -241,29 +254,47 @@ public:
     UndoInfo makeMoveWithUndo(int move, int player) {
         UndoInfo undo;
         undo.move = move;
+        
+        // Update Zobrist key for placing the piece
+        zobristKey ^= Zobrist::squarePiece[move][EMPTY];
         board[move] = player;
+        zobristKey ^= Zobrist::squarePiece[move][player];
         
         for(int d = 0; d < 8; ++d) {
             std::vector<int> flipped = makeFlipsAndRecord(move, player, AllDirections[d]);
             undo.flippedPositions.insert(undo.flippedPositions.end(), flipped.begin(), flipped.end());
         }
         
+        // Toggle side to move in hash
+        zobristKey ^= Zobrist::sideToMove[player - 1];
+        zobristKey ^= Zobrist::sideToMove[opponent(player) - 1];
+        
         return undo;
     }
 
     void unmakeMove(const UndoInfo& undo, int player) {
-        board[undo.move] = EMPTY;
+        // Undo Zobrist key changes (reverse order of makeMoveWithUndo)
+        // Toggle side to move back
+        zobristKey ^= Zobrist::sideToMove[opponent(player) - 1];
+        zobristKey ^= Zobrist::sideToMove[player - 1];
+        
+        // Undo flipped pieces
         int opponent_player = opponent(player);
         for(int pos : undo.flippedPositions) {
+            zobristKey ^= Zobrist::squarePiece[pos][player];         // Remove current piece
             board[pos] = opponent_player;
+            zobristKey ^= Zobrist::squarePiece[pos][opponent_player]; // Restore original piece
         }
+        
+        // Undo the move itself
+        zobristKey ^= Zobrist::squarePiece[undo.move][player];
+        board[undo.move] = EMPTY;
+        zobristKey ^= Zobrist::squarePiece[undo.move][EMPTY];
     }
     
-    // Get board as array for hashing
-    std::array<int, 100> getBoardArray() const {
-        std::array<int, 100> arr;
-        std::copy(board, board + 100, arr.begin());
-        return arr;
+    // Get Zobrist key for current position with player to move
+    uint64_t getZobristKey(int player) const {
+        return zobristKey ^ Zobrist::sideToMove[player - 1];
     }
     
     // Helper methods for advanced evaluation
@@ -580,18 +611,18 @@ public:
         }
         
         int originalAlpha = alpha;
-        std::array<int, 100> boardArray = board.getBoardArray();
+        uint64_t zobristKey = board.getZobristKey(player);
         
         // Check transposition table
         int ttValue, ttMove = -1;
-        if(transTable.lookup(boardArray, player, ply, alpha, beta, ttValue, ttMove)) {
+        if(transTable.lookup(zobristKey, ply, alpha, beta, ttValue, ttMove)) {
             if(ply > 0) bestm[ply] = ttMove;
             return ttValue;
         }
         
         if(ply == 0) {
             int evaluation = board.advancedEvaluation(player);
-            transTable.store(boardArray, player, evaluation, ply, -1, TTEntry::EXACT);
+            transTable.store(zobristKey, evaluation, ply, -1, TTEntry::EXACT);
             return evaluation;
         }
         
@@ -642,24 +673,48 @@ public:
         if(moves.empty()) {
             if(board.hasLegalMoves(board.opponent(player))) {
                 int val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
-                transTable.store(boardArray, player, val, ply, -1, TTEntry::EXACT);
+                transTable.store(zobristKey, val, ply, -1, TTEntry::EXACT);
                 return val;
             }
             int diff = 0;
             for(int i = 0; i < 100; ++i) diff += (board.board[i] == player) - (board.board[i] == board.opponent(player));
             int val = (diff > 0) ? WinningValue : (diff < 0) ? LosingValue : 0;
-            transTable.store(boardArray, player, val, ply, -1, TTEntry::EXACT);
+            transTable.store(zobristKey, val, ply, -1, TTEntry::EXACT);
             return val;
         }
         
         int bestVal = INT_MIN;
         int bestMove = -1;
+        bool isPVNode = (beta - alpha > 1);
+        bool firstMove = true;
+        
         for(int move : moves) {
             // Check time limit during search
             if(timeExpired) break;
             
             OthelloBoard::UndoInfo undo = board.makeMoveWithUndo(move, player);
-            int val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
+            int val;
+            
+            if(firstMove) {
+                // Search first move with full window
+                val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
+                firstMove = false;
+            } else {
+                // Principal Variation Search (PVS): use null window for non-PV nodes
+                if(isPVNode) {
+                    // Try with null window first
+                    val = -alphabeta(board.opponent(player), -alpha-1, -alpha, ply-1);
+                    
+                    // If it beats alpha, re-search with full window
+                    if(val > alpha && val < beta && !timeExpired) {
+                        val = -alphabeta(board.opponent(player), -beta, -alpha, ply-1);
+                    }
+                } else {
+                    // Non-PV node: use null window
+                    val = -alphabeta(board.opponent(player), -alpha-1, -alpha, ply-1);
+                }
+            }
+            
             board.unmakeMove(undo, player);
             
             if(timeExpired) break;
@@ -688,7 +743,7 @@ public:
         } else {
             flag = TTEntry::EXACT;
         }
-        transTable.store(boardArray, player, bestVal, ply, bestMove, flag);
+        transTable.store(zobristKey, bestVal, ply, bestMove, flag);
         
         return bestVal;
     }
